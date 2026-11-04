@@ -41,6 +41,9 @@ hidraw node directly.
 ## Display
 
 - Factory EDID: one timing (2560x1600 @ 240 Hz), base-block range 48–240 Hz, Adaptive Sync block 60–240 Hz.
+- The kernel (7.2) takes the VRR range from the base-block range limits (48–240 Hz), not from the
+  DisplayID Adaptive Sync block (60–240 Hz); `vrr_range` reads 48–240 with or without that block.
+  i915 uses the selected mode's rate as the VRR maximum, so 60 Hz+VRR = 48–60, 120 Hz+VRR = 48–120.
 - PSR1 is supported and active on i915.
 - The panel can also be routed to the RTX (`eDP-2` on the NVIDIA card = hardware mux / Advanced Optimus).
   The Acer WMI "GPU mode" setting used by some Linux tools does not answer on this model. NVIDIA's README
