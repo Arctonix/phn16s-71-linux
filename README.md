@@ -1,8 +1,17 @@
-# 60 Hz / 120 Hz for the Acer Predator Helios Neo 16S AI OLED (PHN16S-71) on Linux
+# Acer Predator Helios Neo 16S AI (PHN16S-71) OLED stuck at 240Hz: 60Hz / 120Hz fix
 
-The PHN16S-71's 2560x1600 OLED is "locked" at 240 Hz: Windows and Linux only offer 240 Hz, even on
-battery, and Acer support has said there is no setting or update to change it. That is the most common
-complaint about this laptop's battery life.
+**Can't change the refresh rate on the Helios Neo 16S AI? Battery draining fast because the screen is stuck
+at 240Hz, even on battery?** This adds working **60Hz and 120Hz** modes to the 16" 2560x1600 OLED
+(Samsung ATNA60DL03-0) and cuts idle power draw by about a third. Tested on Linux (Fedora); untested
+notes for Windows below.
+
+Meant for Acer Predator Helios Neo 16S AI PHN16S-71 models with the 240Hz OLED (owners of the
+PHN16S-71-98RF, for example, report the same 240Hz lock). Other SKUs may use a different panel, so the
+installer checks first and refuses any panel that isn't a Samsung ATNA60DL03-0.
+
+The PHN16S-71's OLED is "locked" at 240 Hz: Windows and Linux only offer 240 Hz, even on battery, and
+Acer support has said there is no setting or update to change it. That is the most common complaint
+about this laptop's battery life.
 
 **The panel is not locked.** Its factory EDID (the list of modes the panel reports to the computer)
 simply contains only one timing: 2560x1600 @ 240 Hz. This repo adds 60 Hz and 120 Hz timings derived from
