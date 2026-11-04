@@ -40,7 +40,7 @@ Requirements: Intel iGPU driving the panel (i915, the default "Optimus/hybrid" m
 `CONFIG_DRM_LOAD_EDID_FIRMWARE=y` (Fedora has it).
 
 ```bash
-git clone <this repo> && cd phn16s-71-linux
+git clone https://github.com/Arctonix/phn16s-71-linux.git && cd phn16s-71-linux
 sudo ./install-edid.sh
 reboot
 ```
