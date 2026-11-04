@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Make the Acer Predator mode key cycle the firmware power profiles.
+
+On the PHN16S-71 the mode key is not a keyboard key: each press sends a
+3-byte vendor HID report (04 85 ff, usage page 0x88) from the internal I2C HID
+device 1025:174B. The kernel ignores that usage page, so this daemon reads the
+hidraw node and sets /sys/class/platform-profile/*/profile (acer-wmi).
+
+tuned-ppd follows the platform profile on its own, so GNOME's Power Mode stays
+in sync (Quiet and Performance show up there as "Balanced").
+
+On unplug, Performance/Turbo drop to Balanced.
+
+Installed as /usr/local/libexec/acer-mode-key, run by acer-mode-key.service.
+"""
+import glob
+import os
+import pwd
+import select
+import subprocess
+import sys
+import time
+
+HID_ID = "0018:00001025:0000174B"
+REPORT = b"\x04\x85"
+
+# Order of the cycle, and which ones are used on battery.
+CYCLE_AC = ["low-power", "quiet", "balanced", "balanced-performance", "performance"]
+CYCLE_BATTERY = ["low-power", "quiet", "balanced"]
+
+NAMES = {
+    "low-power": ("Eco", "CPU 45 W, GPU 70 W"),
+    "quiet": ("Quiet", "CPU 45 W, GPU 70 W, quieter fans"),
+    "balanced": ("Balanced", "CPU 65 W, GPU 70 W"),
+    "balanced-performance": ("Performance", "CPU 75 W, GPU 85 W"),
+    "performance": ("Turbo", "CPU 85 W, GPU 100 W, max fans"),
+}
+
+DEBOUNCE_S = 0.3
+AC_POLL_S = 2.0
+# On unplug, drop the AC-only modes to this one (Windows PredatorSense does the same).
+ON_UNPLUG = "balanced"
+notify_ids = {}  # uid -> last notification id, so a new press replaces the old popup
+
+
+def log(msg):
+    print(f"acer-mode-key: {msg}", flush=True)
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def find_hidraw():
+    for d in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        uevent = read(os.path.join(d, "device/uevent")) or ""
+        if f"HID_ID={HID_ID}" in uevent.splitlines():
+            return "/dev/" + os.path.basename(d)
+    return None
+
+
+def profile_file():
+    for d in sorted(glob.glob("/sys/class/platform-profile/platform-profile-*")):
+        if read(os.path.join(d, "name")) == "acer-wmi":
+            return os.path.join(d, "profile")
+    return None
+
+
+def on_ac():
+    for d in glob.glob("/sys/class/power_supply/*"):
+        if read(os.path.join(d, "type")) == "Mains":
+            return read(os.path.join(d, "online")) == "1"
+    return True
+
+
+def next_profile(current, ac):
+    allowed = CYCLE_AC if ac else CYCLE_BATTERY
+    if current in CYCLE_AC:
+        i = CYCLE_AC.index(current)
+        for step in range(1, len(CYCLE_AC) + 1):
+            cand = CYCLE_AC[(i + step) % len(CYCLE_AC)]
+            if cand in allowed:
+                return cand
+    return allowed[0]
+
+
+def notify(profile, ac):
+    title, body = NAMES.get(profile, (profile, ""))
+    if not ac and profile == CYCLE_BATTERY[-1]:
+        body += " (Performance/Turbo only on AC)"
+    for bus in glob.glob("/run/user/*/bus"):
+        uid = int(bus.split("/")[3])
+        if uid < 1000:
+            continue
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            continue
+        cmd = ["runuser", "-u", user, "--", "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
+               "notify-send", "-p", "-e", "-a", "Power mode", "-i", "power-profile-balanced-symbolic",
+               "-t", "2000"]
+        if uid in notify_ids:
+            cmd += ["-r", notify_ids[uid]]
+        cmd += [f"Power mode: {title}", body]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if out.returncode == 0 and out.stdout.strip().isdigit():
+                notify_ids[uid] = out.stdout.strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"notify failed: {e}")
+
+
+def handle_press():
+    pf = profile_file()
+    if not pf:
+        log("no acer-wmi platform profile")
+        return
+    current = read(pf)
+    ac = on_ac()
+    new = next_profile(current, ac)
+    try:
+        with open(pf, "w") as f:
+            f.write(new + "\n")
+    except OSError as e:
+        log(f"setting {new} failed: {e}")
+        return
+    log(f"{current} -> {new} ({'AC' if ac else 'battery'})")
+    notify(new, ac)
+
+
+def check_unplug(state):
+    """Called every AC_POLL_S. state = {'ac': bool}."""
+    ac = on_ac()
+    if state.get("ac") and not ac:
+        pf = profile_file()
+        cur = read(pf) if pf else None
+        if cur and cur not in CYCLE_BATTERY:
+            try:
+                with open(pf, "w") as f:
+                    f.write(ON_UNPLUG + "\n")
+                log(f"unplugged: {cur} -> {ON_UNPLUG}")
+                notify(ON_UNPLUG, False)
+            except OSError as e:
+                log(f"unplug switch failed: {e}")
+    state["ac"] = ac
+
+
+def main():
+    last = 0.0
+    power = {"ac": on_ac()}
+    while True:
+        dev = find_hidraw()
+        if not dev:
+            check_unplug(power)
+            time.sleep(5)
+            continue
+        try:
+            fd = os.open(dev, os.O_RDONLY)
+        except OSError as e:
+            log(f"open {dev}: {e}")
+            time.sleep(5)
+            continue
+        log(f"listening on {dev}")
+        try:
+            while True:
+                ready, _, _ = select.select([fd], [], [], AC_POLL_S)
+                check_unplug(power)
+                if not ready:
+                    continue
+                data = os.read(fd, 64)
+                if not data:
+                    break
+                if data[:2] == REPORT:
+                    now = time.monotonic()
+                    if now - last >= DEBOUNCE_S:
+                        last = now
+                        handle_press()
+        except OSError as e:
+            log(f"{dev} went away ({e}), reopening")
+        finally:
+            os.close(fd)
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

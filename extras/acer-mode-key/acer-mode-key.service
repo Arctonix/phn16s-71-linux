@@ -1,0 +1,12 @@
+[Unit]
+Description=Acer Predator mode key -> firmware power profile
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/acer-mode-key
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

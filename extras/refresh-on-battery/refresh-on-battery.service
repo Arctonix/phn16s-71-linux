@@ -1,0 +1,12 @@
+[Unit]
+Description=Internal panel at 60 Hz on battery, previous mode on AC
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/refresh-on-battery
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Run the internal panel at 60 Hz on battery and restore the previous mode on AC.
+
+User service (needs the GNOME session bus). Talks to Mutter's DisplayConfig
+D-Bus API and UPower. Only touches the internal panel (eDP-*); external
+monitors keep their current modes. The change is applied as a *temporary*
+config, so the saved display settings (monitors.xml) stay as you set them.
+
+  refresh-on-battery            run as a daemon
+  refresh-on-battery battery    apply the battery mode once (testing)
+  refresh-on-battery ac         restore the AC mode once (testing)
+"""
+import json
+import os
+import sys
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+BATTERY_HZ = 60.0
+STATE = os.path.join(GLib.get_user_state_dir(), "refresh-on-battery.json")
+
+
+def log(msg):
+    print(f"refresh-on-battery: {msg}", flush=True)
+
+
+def mutter():
+    return Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None,
+        "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+        "org.gnome.Mutter.DisplayConfig", None)
+
+
+def get_state(dc):
+    serial, monitors, logical, props = dc.call_sync(
+        "GetCurrentState", None, Gio.DBusCallFlags.NONE, -1, None).unpack()
+    return serial, monitors, logical, props
+
+
+def current_modes(monitors):
+    """connector -> (current mode id, [modes])"""
+    out = {}
+    for (spec, modes, _props) in monitors:
+        connector = spec[0]
+        cur = next((m for m in modes if m[6].get("is-current")), None)
+        out[connector] = (cur, modes)
+    return out
+
+
+def apply(dc, serial, logical, props, connector_modes):
+    """Re-apply the current layout with the given connector->mode_id changes."""
+    new_logical = []
+    for (x, y, scale, transform, primary, mons, _p) in logical:
+        new_mons = [(spec[0], connector_modes[spec[0]], {}) for spec in mons]
+        new_logical.append((x, y, scale, transform, primary, new_mons))
+    params = {}
+    if "layout-mode" in props:
+        params["layout-mode"] = GLib.Variant("u", props["layout-mode"])
+    dc.call_sync(
+        "ApplyMonitorsConfig",
+        GLib.Variant("(uua(iiduba(ssa{sv}))a{sv})", (serial, 1, new_logical, params)),
+        Gio.DBusCallFlags.NONE, -1, None)
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as f:
+        json.dump(st, f)
+
+
+def to_battery(dc):
+    serial, monitors, logical, props = get_state(dc)
+    cur = current_modes(monitors)
+    changes = {c: m[0][0] for c, m in cur.items() if m[0]}
+    saved = {}
+    for conn, (mode, modes) in cur.items():
+        if not conn.startswith("eDP") or not mode or mode[3] <= BATTERY_HZ + 1:
+            continue
+        vrr = mode[0].endswith("+vrr")
+        cands = [m for m in modes if m[1] == mode[1] and m[2] == mode[2]
+                 and m[0].endswith("+vrr") == vrr and abs(m[3] - BATTERY_HZ) < 0.5]
+        if not cands:
+            log(f"{conn}: no {BATTERY_HZ:.0f} Hz mode at {mode[1]}x{mode[2]}")
+            continue
+        best = min(cands, key=lambda m: abs(m[3] - BATTERY_HZ))
+        changes[conn] = best[0]
+        saved[conn] = mode[0]
+    if not saved:
+        return
+    apply(dc, serial, logical, props, changes)
+    save_state({"restore": saved})
+    log(f"battery: {saved} -> { {c: changes[c] for c in saved} }")
+
+
+def to_ac(dc):
+    st = load_state().get("restore", {})
+    if not st:
+        return
+    serial, monitors, logical, props = get_state(dc)
+    cur = current_modes(monitors)
+    changes = {c: m[0][0] for c, m in cur.items() if m[0]}
+    restored = {}
+    for conn, mode_id in st.items():
+        if conn in cur and any(m[0] == mode_id for m in cur[conn][1]):
+            # Only restore if the user hasn't picked something else meanwhile.
+            if cur[conn][0] and abs(cur[conn][0][3] - BATTERY_HZ) < 0.5:
+                changes[conn] = mode_id
+                restored[conn] = mode_id
+    if restored:
+        apply(dc, serial, logical, props, changes)
+        log(f"ac: restored {restored}")
+    save_state({})
+
+
+def main():
+    dc = mutter()
+    if len(sys.argv) > 1:
+        {"battery": to_battery, "ac": to_ac}[sys.argv[1]](dc)
+        return 0
+
+    upower = Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, None,
+        "org.freedesktop.UPower", "/org/freedesktop/UPower", "org.freedesktop.UPower", None)
+    last = {"on_battery": None}
+
+    def sync(*_):
+        ob = upower.get_cached_property("OnBattery")
+        ob = bool(ob.unpack()) if ob is not None else False
+        if ob == last["on_battery"]:
+            return
+        last["on_battery"] = ob
+        try:
+            (to_battery if ob else to_ac)(dc)
+        except GLib.Error as e:
+            log(f"failed: {e.message}")
+
+    # Only act on plug/unplug, so a mode you pick by hand is left alone.
+    upower.connect("g-properties-changed", sync)
+    sync()
+    log("running")
+    GLib.MainLoop().run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

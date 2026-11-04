@@ -1,0 +1,12 @@
+[Unit]
+Description=Acer battery health mode (charge limit ~80%%)
+After=systemd-modules-load.service
+ConditionPathExists=/sys/bus/wmi/drivers/acer-wmi-battery/health_mode
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "echo 1 > /sys/bus/wmi/drivers/acer-wmi-battery/health_mode"
+
+[Install]
+WantedBy=multi-user.target
